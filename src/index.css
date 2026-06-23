@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: ui-serif, Georgia, Cambria, Palatino, serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+input,
+select,
+button,
+textarea {
+  font-family: inherit;
+  color-scheme: dark;
+}
+
+input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+select option {
+  background: #1a1f2e;
+  color: #e8eaed;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.8);
+}
