@@ -58,6 +58,30 @@ const SEED = [
 ];
 
 const STORE_KEY = "expenses-v1";
+const BUDGET_STORE_KEY = "budget-v1";
+
+const LOCATION_PROFILES = {
+  Taiwan: {
+    "Food & Drink": 0.35,
+    "Bills & Utilities": 0.15,
+    Entertainment: 0.15,
+    Transportation: 0.08,
+    "Personal Care": 0.07,
+    Shopping: 0.10,
+    Health: 0.05,
+    Other: 0.05,
+  },
+};
+
+function defaultBudget() {
+  return {
+    income: "",
+    mode: "percent",
+    savingsValue: "20",
+    location: "Taiwan",
+    weights: { ...LOCATION_PROFILES.Taiwan },
+  };
+}
 
 const store = {
   async get(key) {
@@ -83,6 +107,7 @@ const C = {
   accent: "#6ee7c8",
   accentDim: "rgba(110, 231, 200, 0.18)",
   danger: "#f87171",
+  warn: "#f0b86e",
   chartLine: "#6ee7c8",
   chartGrid: "rgba(255, 255, 255, 0.08)",
 };
@@ -158,6 +183,41 @@ function shiftDate(s, days) {
   const dt = new Date(y, m - 1, d);
   dt.setDate(dt.getDate() + days);
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+}
+function monthYearLabel(dateStr) {
+  const [y, m] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+function daysInMonth(dateStr) {
+  const [y, m] = dateStr.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
+}
+function monthKey(dateStr) {
+  const [y, m] = dateStr.split("-").map(Number);
+  return `${y}-${String(m).padStart(2, "0")}`;
+}
+function paceDay(dateStr) {
+  const D = daysInMonth(dateStr);
+  const [y, m] = dateStr.split("-").map(Number);
+  const [ty, tm, td] = todayStr().split("-").map(Number);
+  if (y === ty && m === tm) return td;
+  if (y < ty || (y === ty && m < tm)) return D;
+  return 0;
+}
+function monthPhase(dateStr) {
+  const [y, m] = dateStr.split("-").map(Number);
+  const [ty, tm] = todayStr().split("-").map(Number);
+  if (y < ty || (y === ty && m < tm)) return "past";
+  if (y === ty && m === tm) return "current";
+  return "future";
+}
+
+function Collapse({ open, children, className = "" }) {
+  return (
+    <div className={`collapse-panel${open ? " collapse-panel-open" : ""}${className ? ` ${className}` : ""}`}>
+      <div className="collapse-panel-inner">{children}</div>
+    </div>
+  );
 }
 
 function csvEscape(value) {
@@ -238,14 +298,26 @@ export default function SpendingTracker() {
   const [editingId, setEditingId] = useState(null);
   const [draft, setDraft] = useState(null);
 
+  const [budget, setBudget] = useState(defaultBudget);
+  const [budgetSetupOpen, setBudgetSetupOpen] = useState(false);
+  const [weightsEditorOpen, setWeightsEditorOpen] = useState(false);
+
   useEffect(() => {
     (async () => {
       try {
-        const raw = await store.get(STORE_KEY);
-        let data = raw ? JSON.parse(raw) : null;
+        const [rawExp, rawBudget] = await Promise.all([
+          store.get(STORE_KEY),
+          store.get(BUDGET_STORE_KEY),
+        ]);
+        let data = rawExp ? JSON.parse(rawExp) : null;
         if (!data) { await store.set(STORE_KEY, JSON.stringify(SEED)); data = SEED; }
         setExpenses(data);
         if (data.length) setSelectedDate(data.map((e) => e.date).sort().slice(-1)[0]);
+
+        if (rawBudget) {
+          const parsed = JSON.parse(rawBudget);
+          setBudget({ ...defaultBudget(), ...parsed, weights: { ...defaultBudget().weights, ...parsed.weights } });
+        }
       } catch {
         setExpenses(SEED);
         setSelectedDate("2026-06-22");
@@ -254,6 +326,15 @@ export default function SpendingTracker() {
       }
     })();
   }, []);
+
+  async function persistBudget(next) {
+    setBudget(next);
+    await store.set(BUDGET_STORE_KEY, JSON.stringify(next));
+  }
+
+  function updateBudget(patch) {
+    persistBudget({ ...budget, ...patch });
+  }
 
   async function persist(next) {
     setExpenses(next);
@@ -341,12 +422,21 @@ export default function SpendingTracker() {
 
   const quickAdds = useMemo(() => {
     const map = {};
-    [...expenses].sort((a, b) => a.id - b.id).forEach((e) => {
+    expenses.forEach((e) => {
       const key = e.desc.toLowerCase().trim();
       if (!key || key === "(no label)") return;
-      map[key] = { desc: e.desc, cat: e.cat, amount: e.amount, lastId: e.id };
+      if (!map[key]) map[key] = { desc: e.desc, count: 0, cat: e.cat, amount: e.amount, lastId: e.id };
+      map[key].count += 1;
+      if (e.id >= map[key].lastId) {
+        map[key].lastId = e.id;
+        map[key].desc = e.desc;
+        map[key].cat = e.cat;
+        map[key].amount = e.amount;
+      }
     });
-    return Object.values(map).sort((a, b) => b.lastId - a.lastId).slice(0, 7);
+    return Object.values(map)
+      .sort((a, b) => b.count - a.count || b.lastId - a.lastId)
+      .slice(0, 7);
   }, [expenses]);
 
   const breakdown = useMemo(() => {
@@ -368,6 +458,45 @@ export default function SpendingTracker() {
   }, [expenses]);
 
   const scopeTotal = scope === "day" ? dayTotal : allTotal;
+
+  const plan = useMemo(() => {
+    const I = Number(budget.income) || 0;
+    const savingsVal = Number(budget.savingsValue) || 0;
+    const S = budget.mode === "percent" ? I * (savingsVal / 100) : savingsVal;
+    const spendable = Math.max(I - S, 0);
+    const weights = budget.weights || LOCATION_PROFILES[budget.location] || LOCATION_PROFILES.Taiwan;
+    const mk = monthKey(selectedDate);
+    const D = daysInMonth(selectedDate);
+    const d = paceDay(selectedDate);
+    const f = D > 0 ? d / D : 0;
+
+    const spentByCat = {};
+    expenses.filter((e) => e.date.startsWith(mk)).forEach((e) => {
+      spentByCat[e.cat] = (spentByCat[e.cat] || 0) + e.amount;
+    });
+    const spent = Object.values(spentByCat).reduce((s, v) => s + v, 0);
+
+    const catBudgets = Object.keys(CATEGORIES).map((cat) => ({
+      cat,
+      budget: (weights[cat] || 0) * spendable,
+      spent: spentByCat[cat] || 0,
+    }));
+
+    const projTotal = d > 0 ? (spent / d) * D : spent;
+    const projSavings = I - projTotal;
+    const status = projTotal > I ? "over" : projTotal > spendable ? "warn" : "ok";
+    const phase = monthPhase(selectedDate);
+    const actualSaved = I - spent;
+
+    return {
+      I, S, spendable, D, d, f, spent, spentByCat, catBudgets, projTotal, projSavings, status, weights,
+      phase, actualSaved, monthConcluded: phase === "past",
+    };
+  }, [budget, expenses, selectedDate]);
+
+  const weightSumPct = Math.round(Object.values(plan.weights).reduce((s, w) => s + w, 0) * 1000) / 10;
+  const weightsOk = Math.abs(weightSumPct - 100) <= 1;
+  const incomeSet = plan.I > 0;
 
   if (loading) {
     return (
@@ -395,7 +524,7 @@ export default function SpendingTracker() {
       </div>
 
       {/* add bar */}
-      <div style={{ ...glassInner, borderRadius: 20 }} className="p-4 mb-5">
+      <div style={{ ...glassInner, borderRadius: 20 }} className="p-4 mb-5 panel-resize">
         <div className="flex flex-wrap gap-2 items-stretch">
           <div className="flex items-center rounded-xl px-3" style={fieldStyle}>
             <span className="text-sm font-semibold mr-1" style={{ color: C.muted }}>{CURRENCY}</span>
@@ -415,17 +544,215 @@ export default function SpendingTracker() {
           <button onClick={addExpense} className="rounded-xl px-5 py-2 text-sm font-semibold" style={glassBtn(true)}>Add</button>
         </div>
 
-        <div className="flex flex-wrap gap-2 mt-3 items-center">
-          <span className="text-xs" style={{ color: C.muted }}>Quick add</span>
+        <div className="quick-add-row flex flex-wrap gap-2 mt-3 items-center">
+          <span className="text-xs shrink-0" style={{ color: C.muted }}>Quick add</span>
           {quickAdds.length === 0 ? (
-            <span className="text-xs" style={{ color: C.muted }}>— items you log will show up here for one-tap re-adding</span>
+            <span className="text-xs quick-add-empty" style={{ color: C.muted }}>— items you log will show up here for one-tap re-adding</span>
           ) : quickAdds.map((q) => (
-            <button key={q.desc} onClick={() => applyQuick(q)} className="text-xs rounded-full px-3 py-1"
+            <button key={q.desc} onClick={() => applyQuick(q)} className="quick-chip text-xs rounded-full px-3 py-1"
               style={{ ...glassInner, borderRadius: 99, color: C.ink }}>
-              {q.desc}
+              {q.desc}{q.count > 1 && <span style={{ color: C.accent }}> ×{q.count}</span>}
             </button>
           ))}
         </div>
+      </div>
+
+      {/* monthly budget & plan */}
+      <div style={{ ...glassInner, borderRadius: 20 }} className="p-4 mb-5 panel-resize">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <h2 className="font-semibold">Monthly plan · {monthYearLabel(selectedDate)}</h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs px-2 py-0.5 rounded-full" style={{ ...glassInner, borderRadius: 99, color: C.muted }}>
+              Profile: {budget.location}
+            </span>
+            <button onClick={() => setBudgetSetupOpen((o) => !o)} className="text-xs px-3 py-1 rounded-lg" style={glassBtn(budgetSetupOpen)}>
+              {budgetSetupOpen ? "Close setup" : "Setup"}
+            </button>
+          </div>
+        </div>
+
+        <Collapse open={budgetSetupOpen} className="mb-4">
+          <div className="p-3 rounded-xl space-y-3" style={{ ...glassInner, borderRadius: 14 }}>
+            <div className="flex flex-wrap gap-2 items-center">
+              <span className="text-xs" style={{ color: C.muted }}>Monthly income (after tax)</span>
+              <div className="flex items-center rounded-xl px-3" style={fieldStyle}>
+                <span className="text-sm mr-1" style={{ color: C.muted }}>{CURRENCY}</span>
+                <input type="number" inputMode="decimal" placeholder="0" value={budget.income}
+                  onChange={(e) => updateBudget({ income: e.target.value })}
+                  className="bg-transparent outline-none py-1.5 w-28 text-sm" style={nums} />
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2 items-center">
+              <span className="text-xs" style={{ color: C.muted }}>Savings goal</span>
+              <input type="number" inputMode="decimal" value={budget.savingsValue}
+                onChange={(e) => updateBudget({ savingsValue: e.target.value })}
+                className="w-20 rounded-xl px-2 py-1.5 text-sm outline-none" style={{ ...fieldStyle, ...nums }} />
+              <div className="flex rounded-xl overflow-hidden" style={{ ...glassInner, padding: 2, borderRadius: 10 }}>
+                {["percent", "amount"].map((m) => (
+                  <button key={m} onClick={() => updateBudget({ mode: m })} className="text-xs px-2 py-1 rounded-lg"
+                    style={glassBtn(budget.mode === m)}>
+                    {m === "percent" ? "%" : CURRENCY}
+                  </button>
+                ))}
+              </div>
+              <span className="text-xs ml-auto" style={{ color: C.muted }}>
+                Spendable after savings: <span style={{ ...nums, color: C.accent }}>{fmt(plan.spendable)}</span>
+              </span>
+            </div>
+            <div>
+              <button onClick={() => setWeightsEditorOpen((o) => !o)} className="text-xs underline" style={{ color: C.muted }}>
+                {weightsEditorOpen ? "Hide category targets" : "Adjust category targets"}
+              </button>
+              <Collapse open={weightsEditorOpen}>
+                <div className="mt-2 space-y-2">
+                  {Object.keys(CATEGORIES).map((cat) => (
+                    <div key={cat} className="flex items-center gap-2 text-xs">
+                      <span className="flex-1 truncate" style={{ color: C.ink }}>{cat}</span>
+                      <input type="number" inputMode="decimal"
+                        value={Math.round((plan.weights[cat] || 0) * 1000) / 10}
+                        onChange={(e) => {
+                          const pct = parseFloat(e.target.value);
+                          updateBudget({
+                            weights: { ...budget.weights, [cat]: Number.isFinite(pct) ? pct / 100 : 0 },
+                          });
+                        }}
+                        className="w-16 rounded-lg px-2 py-1 outline-none text-right" style={{ ...fieldStyle, ...nums }} />
+                      <span style={{ color: C.muted }}>%</span>
+                    </div>
+                  ))}
+                  <div className="text-xs" style={{ color: weightsOk ? C.muted : C.warn }}>
+                    Weight sum: {weightSumPct}% {weightsOk ? "" : "(should be ~100%)"}
+                  </div>
+                </div>
+              </Collapse>
+            </div>
+          </div>
+        </Collapse>
+
+        {!incomeSet ? (
+          <div className="text-sm py-4 text-center" style={{ color: C.muted }}>
+            Set your monthly income and savings goal in Setup to track your plan.
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-4 text-xs">
+              <div>
+                <div style={{ color: C.muted }}>Income</div>
+                <div className="font-semibold" style={nums}>{fmt(plan.I)}</div>
+              </div>
+              <div>
+                <div style={{ color: C.muted }}>Savings goal</div>
+                <div className="font-semibold" style={nums}>{fmt(plan.S)}</div>
+              </div>
+              <div>
+                <div style={{ color: C.muted }}>Spent so far</div>
+                <div className="font-semibold" style={nums}>{fmt(plan.spent)}</div>
+              </div>
+              <div>
+                <div style={{ color: C.muted }}>Projected month-end</div>
+                <div className="font-semibold" style={nums}>{fmt(plan.projTotal)}</div>
+                <div style={{ color: C.muted }}>run-rate · day {plan.d}/{plan.D}</div>
+              </div>
+              <div>
+                <div style={{ color: C.muted }}>Projected savings</div>
+                <div className="font-semibold" style={{ ...nums, color: plan.projSavings < plan.S ? C.danger : C.ink }}>
+                  {fmt(plan.projSavings)}
+                </div>
+              </div>
+            </div>
+
+            <div className="text-xs rounded-xl px-3 py-2 mb-4" style={
+              plan.status === "ok"
+                ? { background: C.accentDim, color: C.accent }
+                : plan.status === "warn"
+                  ? { background: "rgba(240, 184, 110, 0.15)", color: C.warn }
+                  : { background: "rgba(248, 113, 113, 0.15)", color: C.danger }
+            }>
+              {plan.status === "ok" && "On track to hit savings goal"}
+              {plan.status === "warn" && "Off pace — projected to miss savings goal"}
+              {plan.status === "over" && "Over budget — projected to overspend income"}
+            </div>
+
+            <div className="space-y-3">
+              {plan.catBudgets
+                .filter(({ budget: b, spent: s }) => b > 0 || s > 0)
+                .sort((a, b) => b.budget - a.budget || b.spent - a.spent)
+                .map(({ cat, budget: catBudget, spent: catSpent }) => (
+                  <div key={cat}>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span style={{ color: C.ink }}>{cat}</span>
+                      <span style={nums} className="font-semibold">
+                        {fmt(catSpent)} / {fmt(catBudget)}
+                      </span>
+                    </div>
+                    <div className="relative" style={{ background: "rgba(255,255,255,0.08)", height: 6, borderRadius: 99 }}>
+                      <div style={{
+                        width: `${catBudget > 0 ? Math.min(catSpent / catBudget, 1) * 100 : 0}%`,
+                        height: 6,
+                        borderRadius: 99,
+                        background: catSpent > catBudget ? C.danger : CATEGORIES[cat],
+                      }} />
+                      <div style={{
+                        position: "absolute",
+                        left: `${plan.f * 100}%`,
+                        top: -1,
+                        bottom: -1,
+                        width: 2,
+                        marginLeft: -1,
+                        background: C.ink,
+                        opacity: 0.45,
+                        borderRadius: 1,
+                      }} />
+                    </div>
+                  </div>
+                ))}
+            </div>
+            <p className="text-xs mt-3" style={{ color: C.muted }}>
+              Vertical marker = expected spend pace for day {plan.d} of {plan.D}.
+            </p>
+
+            {plan.phase !== "future" && (
+              <div className="mt-4 p-3 rounded-xl plan-summary-enter" style={{ ...glassInner, borderRadius: 14 }}>
+                <div className="text-xs font-semibold uppercase tracking-wide mb-3" style={{ color: C.muted }}>
+                  {plan.monthConcluded ? "Month concluded" : "Month in progress"}
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs">
+                  <div>
+                    <div style={{ color: C.muted }}>Total spent</div>
+                    <div className="text-lg font-semibold mt-0.5" style={nums}>{fmt(plan.spent)}</div>
+                    {!plan.monthConcluded && (
+                      <div style={{ color: C.muted }}>of {fmt(plan.spendable)} spendable</div>
+                    )}
+                  </div>
+                  <div>
+                    <div style={{ color: C.muted }}>Money saved</div>
+                    <div className="text-lg font-semibold mt-0.5" style={{
+                      ...nums,
+                      color: plan.actualSaved < 0 ? C.danger : plan.actualSaved >= plan.S ? C.accent : C.warn,
+                    }}>
+                      {fmt(plan.actualSaved)}
+                    </div>
+                    <div style={{ color: C.muted }}>goal {fmt(plan.S)} · income − spent</div>
+                  </div>
+                  {plan.monthConcluded && (
+                    <div className="col-span-2 sm:col-span-1">
+                      <div style={{ color: C.muted }}>vs savings goal</div>
+                      <div className="text-lg font-semibold mt-0.5" style={{
+                        ...nums,
+                        color: plan.actualSaved >= plan.S ? C.accent : C.danger,
+                      }}>
+                        {plan.actualSaved >= plan.S ? "+" : ""}{fmt(plan.actualSaved - plan.S)}
+                      </div>
+                      <div style={{ color: C.muted }}>
+                        {plan.actualSaved >= plan.S ? "above goal" : "below goal"}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {/* spending over time */}

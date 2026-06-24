@@ -30,3 +30,63 @@ select option {
 input[type="date"]::-webkit-calendar-picker-indicator {
   filter: invert(0.8);
 }
+
+/* smooth panel height changes */
+.panel-resize {
+  transition: padding 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.collapse-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.collapse-panel-open {
+  grid-template-rows: 1fr;
+}
+
+.collapse-panel-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* quick-add chip enter + row reflow */
+.quick-add-row {
+  transition: gap 0.3s ease;
+}
+
+.quick-chip {
+  animation: chip-in 0.35s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.quick-add-empty {
+  animation: chip-in 0.3s ease both;
+}
+
+@keyframes chip-in {
+  from {
+    opacity: 0;
+    transform: scale(0.88) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.plan-summary-enter {
+  animation: chip-in 0.4s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel-resize,
+  .collapse-panel,
+  .quick-add-row,
+  .quick-chip,
+  .quick-add-empty,
+  .plan-summary-enter {
+    animation: none;
+    transition: none;
+  }
+}
